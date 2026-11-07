@@ -1,4 +1,5 @@
 import math
+import os
 import re
 from datetime import datetime
 import pandas as pd
@@ -15,7 +16,7 @@ st.set_page_config(
 )
 
 # ==========================================
-# 2. SŁOWNIKI DANYCH (EPPO, BBCH, ROZSZERZONA BAZA ŚOR)
+# 2. SŁOWNIKI DANYCH (EPPO, BBCH, BAZA BAZOWA ŚOR)
 # ==========================================
 
 EPPO_CROPS_DB = {
@@ -171,9 +172,10 @@ EPPO_CROPS_DB = {
 FORMULATION_MIXING_ORDER = {
     "KOND": (1, "1. Kondycjoner wody / Bufor pH (przed wszystkimi środkami)"),
     "WG": (2, "2. Granulaty do sporządzania zawiesiny (WG / SG)"),
+    "SG": (2, "2. Granulaty rozpuszczalne w wodzie (SG)"),
     "SP": (2, "2. Proszki rozpuszczalne w wodzie (SP)"),
     "WP": (2, "2. Proszki do sporządzania zawiesiny (WP)"),
-    "CS": (3, "3. Zawiesiny kapsuł i koncentraty zawiesinowe (CS)"),
+    "CS": (3, "3. Zawiesiny kapsuł (CS)"),
     "SC": (3, "3. Koncentraty stężonych zawiesin (SC)"),
     "SE": (3, "3. Zawiesino-emulsje (SE)"),
     "OD": (3, "3. Zawiesiny olejowe (OD)"),
@@ -184,9 +186,7 @@ FORMULATION_MIXING_ORDER = {
     "ADI": (7, "7. Adiuwanty olejowe i zwilżacze (na sam koniec)"),
 }
 
-# Rozszerzona baza 24 popularnych ŚOR w Polsce (z oficjalnymi numerami MRiRW)
 DEFAULT_SOR_DB = [
-    # HERBICYDY
     {"nazwa": "Chwastox Trio 540 SL", "nr_zezwolenia": "R-110/2014", "kategoria": "Herbicyd", "substancja": "mekoprop-P + MCPA + dikamba", "formulacja": "SL", "dawka_domyslna": 2.0, "jednostka": "l/ha"},
     {"nazwa": "Mustang Forte 195 SE", "nr_zezwolenia": "R-122/2011", "kategoria": "Herbicyd", "substancja": "florasulam + aminopyralid + 2,4-D", "formulacja": "SE", "dawka_domyslna": 1.0, "jednostka": "l/ha"},
     {"nazwa": "Axial 50 EC", "nr_zezwolenia": "R-108/2019", "kategoria": "Herbicyd", "substancja": "pinoksaden (50 g/l)", "formulacja": "EC", "dawka_domyslna": 0.9, "jednostka": "l/ha"},
@@ -200,7 +200,6 @@ DEFAULT_SOR_DB = [
     {"nazwa": "Lumax 537,5 SE", "nr_zezwolenia": "R-66/2011", "kategoria": "Herbicyd", "substancja": "mezotrion + S-metolachlor + terbutylazyna", "formulacja": "SE", "dawka_domyslna": 3.5, "jednostka": "l/ha"},
     {"nazwa": "Agil-S 100 EC", "nr_zezwolenia": "R-76/2012", "kategoria": "Herbicyd", "substancja": "propachizafop (100 g/l)", "formulacja": "EC", "dawka_domyslna": 0.7, "jednostka": "l/ha"},
     {"nazwa": "Roundup Flex 480", "nr_zezwolenia": "R-135/2013", "kategoria": "Herbicyd", "substancja": "glifosat (480 g/l)", "formulacja": "SL", "dawka_domyslna": 2.25, "jednostka": "l/ha"},
-    # FUNGICYDY
     {"nazwa": "Tebu 250 EW", "nr_zezwolenia": "R-71/2014", "kategoria": "Fungicyd", "substancja": "tebukonazol (250 g/l)", "formulacja": "EW", "dawka_domyslna": 1.0, "jednostka": "l/ha"},
     {"nazwa": "Amistar 250 SC", "nr_zezwolenia": "R-98/2011", "kategoria": "Fungicyd", "substancja": "azoksystrobina (250 g/l)", "formulacja": "SC", "dawka_domyslna": 0.8, "jednostka": "l/ha"},
     {"nazwa": "Input 460 EC", "nr_zezwolenia": "R-112/2012", "kategoria": "Fungicyd", "substancja": "protiokonazol + spiroksamina", "formulacja": "EC", "dawka_domyslna": 1.0, "jednostka": "l/ha"},
@@ -208,7 +207,6 @@ DEFAULT_SOR_DB = [
     {"nazwa": "Elatus Era", "nr_zezwolenia": "R-29/2017", "kategoria": "Fungicyd", "substancja": "benzowindyflupyr + protiokonazol", "formulacja": "EC", "dawka_domyslna": 1.0, "jednostka": "l/ha"},
     {"nazwa": "Pictor 400 SC", "nr_zezwolenia": "R-77/2012", "kategoria": "Fungicyd", "substancja": "boskalid + dimoksystrobina", "formulacja": "SC", "dawka_domyslna": 0.5, "jednostka": "l/ha"},
     {"nazwa": "Revus 250 SC", "nr_zezwolenia": "R-55/2011", "kategoria": "Fungicyd", "substancja": "mandipropamid (250 g/l)", "formulacja": "SC", "dawka_domyslna": 0.6, "jednostka": "l/ha"},
-    # INSEKTYCYDY I REGULATORY WZROSTU
     {"nazwa": "Mospilan 20 SP", "nr_zezwolenia": "R-367/2014d", "kategoria": "Insektycyd", "substancja": "acetamipryd (20%)", "formulacja": "SP", "dawka_domyslna": 0.12, "jednostka": "kg/ha"},
     {"nazwa": "Inazuma 130 WG", "nr_zezwolenia": "R-91/2015", "kategoria": "Insektycyd", "substancja": "acetamipryd + lambda-cyhalotryna", "formulacja": "WG", "dawka_domyslna": 0.20, "jednostka": "kg/ha"},
     {"nazwa": "Karate Zeon 050 CS", "nr_zezwolenia": "R-85/2012", "kategoria": "Insektycyd", "substancja": "lambda-cyhalotryna (50 g/l)", "formulacja": "CS", "dawka_domyslna": 0.15, "jednostka": "l/ha"},
@@ -225,7 +223,80 @@ FOLIAR_ADDITIVES_DB = {
 
 
 # ==========================================
-# 3. FUNKCJE FIZYCZNE, POGODOWE I GEODEZYJNE (GUGiK ULDK)
+# 3. PARSER BAZY MRiRW (ETAP 3.5)
+# ==========================================
+def detect_formulation_and_unit(name_str: str):
+    """Wyciąga kod formulacji (SL, EC, WG itp.) oraz jednostkę z nazwy handlowej ŚOR."""
+    upper_name = str(name_str).upper()
+    solid_forms = ["WG", "SG", "SP", "WP"]
+    liquid_forms = ["SL", "EC", "EW", "SC", "CS", "SE", "OD"]
+
+    for f in solid_forms:
+        if re.search(rf"\b{f}\b", upper_name):
+            return f, "kg/ha", 0.25
+    for f in liquid_forms:
+        if re.search(rf"\b{f}\b", upper_name):
+            return f, "l/ha", 1.0
+    return "SC", "l/ha", 1.0
+
+
+def parse_mrirw_dataframe(df: pd.DataFrame) -> list:
+    """Przetwarza surowy arkusz MRiRW (~30 000 wierszy) na zdeduplikowaną listę unikalnych ŚOR."""
+    cols_lower = {str(c).lower().strip(): c for c in df.columns}
+
+    name_col = next((orig for low, orig in cols_lower.items() if "nazwa" in low), None)
+    perm_col = next((orig for low, orig in cols_lower.items() if "zezw" in low or "nr" in low), None)
+    cat_col = next((orig for low, orig in cols_lower.items() if "rodzaj" in low or "typ" in low), None)
+    sub_col = next((orig for low, orig in cols_lower.items() if "substancj" in low or "skład" in low), None)
+
+    if not name_col or not perm_col:
+        return []
+
+    # Usuwamy duplikaty po nazwie handlowej (w pliku MRiRW każdy środek występuje wiele razy dla różnych upraw)
+    df_clean = df.dropna(subset=[name_col, perm_col]).drop_duplicates(subset=[name_col])
+
+    parsed_list = []
+    for _, row in df_clean.iterrows():
+        nazwa = str(row[name_col]).strip()
+        nr_zezw = str(row[perm_col]).strip()
+        if not nazwa or nazwa.lower() == "nan":
+            continue
+
+        kategoria = str(row[cat_col]).strip() if cat_col and pd.notna(row[cat_col]) else "ŚOR (MRiRW)"
+        substancja = str(row[sub_col]).strip() if sub_col and pd.notna(row[sub_col]) else "Wg etykiety"
+        form, unit, def_dose = detect_formulation_and_unit(nazwa)
+
+        parsed_list.append(
+            {
+                "nazwa": nazwa,
+                "nr_zezwolenia": nr_zezw,
+                "kategoria": kategoria,
+                "substancja": substancja,
+                "formulacja": form,
+                "dawka_domyslna": def_dose,
+                "jednostka": unit,
+            }
+        )
+    return parsed_list
+
+
+@st.cache_data(show_spinner=False)
+def load_local_mrirw_registry():
+    """Automatycznie wczytuje plik rejestr_sor.xlsx lub rejestr_sor.csv z repozytorium GitHub, jeśli istnieje."""
+    for filename in ["rejestr_sor.xlsx", "rejestr_sor.csv"]:
+        if os.path.exists(filename):
+            try:
+                df = pd.read_csv(filename) if filename.endswith(".csv") else pd.read_excel(filename)
+                parsed = parse_mrirw_dataframe(df)
+                if parsed:
+                    return parsed, f"Wczytano pełny rejestr MRiRW z pliku `{filename}` ({len(parsed)} unikalnych środków)"
+            except Exception as e:
+                return None, f"Błąd odczytu `{filename}`: {e}"
+    return None, None
+
+
+# ==========================================
+# 4. FUNKCJE FIZYCZNE, POGODOWE I SMART-ULDK (NAPRAWA 150/1)
 # ==========================================
 def safe_float(value, default=0.0):
     try:
@@ -263,14 +334,10 @@ def fetch_imgw_synop_data():
 
 
 def calculate_wkt_area_ha(wkt_str: str) -> float:
-    """Wylicza dokładną powierzchnię działki w hektarach (ha) z geometrii WKT
-
-    w układzie metrycznym EPSG:2180 za pomocą wzoru geodezyjnego Gaussa (Shoelace formula).
-    """
+    """Wylicza powierzchnię działki w hektarach (ha) z geometrii WKT (EPSG:2180) ze wzoru Gaussa."""
     if not wkt_str or "POLYGON" not in wkt_str.upper():
         return 0.0
 
-    # Wyciągamy wszystkie pierścienie współrzędnych w nawiasach
     rings = re.findall(r"\(([^()]+)\)", wkt_str)
     if not rings:
         return 0.0
@@ -289,7 +356,6 @@ def calculate_wkt_area_ha(wkt_str: str) -> float:
         if len(pts) < 3:
             continue
 
-        # Wzór Gaussa (Shoelace formula)
         ring_area = 0.0
         n = len(pts)
         for i in range(n):
@@ -298,7 +364,6 @@ def calculate_wkt_area_ha(wkt_str: str) -> float:
             ring_area += x1 * y2 - x2 * y1
         ring_area = abs(ring_area) / 2.0
 
-        # Pierwszy pierścień to obrys zewnętrzny, kolejne (jeśli występują) to wycięcia/enklawy
         if idx == 0:
             total_area_m2 += ring_area
         else:
@@ -307,71 +372,139 @@ def calculate_wkt_area_ha(wkt_str: str) -> float:
     return round(max(0.01, total_area_m2 / 10000.0), 2)
 
 
+def parse_uldk_parcel_lines(text_response: str) -> list:
+    """Parsuje wiersze odpowiedzi z GUGiK ULDK do listy słowników z wyliczoną powierzchnią."""
+    lines = [line.strip() for line in text_response.splitlines() if line.strip()]
+    data_lines = [l for l in lines if "|" in l and "POLYGON" in l.upper()]
+    results = []
+    for row in data_lines:
+        parts = row.split("|")
+        if len(parts) >= 7:
+            teryt, voiv, county, commune, region, parcel_nr, geom_wkt = parts[:7]
+            area_ha = calculate_wkt_area_ha(geom_wkt)
+            results.append(
+                {
+                    "teryt": teryt,
+                    "wojewodztwo": voiv,
+                    "powiat": county,
+                    "gmina": commune,
+                    "obreb": region,
+                    "nr_dzialki": parcel_nr,
+                    "area_ha": area_ha,
+                    "label": f"{region} - dz. nr {parcel_nr} ({area_ha} ha) | TERYT: {teryt} [gm. {commune}, pow. {county}]",
+                }
+            )
+    return results
+
+
 @st.cache_data(ttl=3600)
 def query_gugik_uldk(search_mode: str, query_val: str):
-    """Odpytuje darmowe API GUGiK ULDK po nazwie/TERYT lub współrzędnych GPS (WGS84)."""
+    """Dwuetapowy algorytm Smart-ULDK obsługujący działki po podziale (np. Wola Dalsza 150/1) oraz arkusze AR_."""
     base_url = "https://uldk.gugik.gov.pl/"
-    if search_mode == "name":
-        params = {
-            "request": "GetParcelByIdOrNr",
-            "id": query_val.strip(),
-            "result": "teryt,voivodeship,county,commune,region,parcel,geom_wkt",
-            "srid": "2180",
-        }
-    else:
-        params = {
-            "request": "GetParcelByXY",
-            "xy": query_val.strip(),
-            "result": "teryt,voivodeship,county,commune,region,parcel,geom_wkt",
-            "srid": "2180",
-        }
+    q_clean = query_val.strip()
 
     try:
+        if search_mode == "xy":
+            params = {
+                "request": "GetParcelByXY",
+                "xy": q_clean,
+                "result": "teryt,voivodeship,county,commune,region,parcel,geom_wkt",
+                "srid": "2180",
+            }
+            resp = requests.get(base_url, params=params, timeout=12)
+            results = parse_uldk_parcel_lines(resp.text)
+            if results:
+                return results, None
+            return [], f"Nie znaleziono działki dla współrzędnych GPS: {q_clean}"
+
+        # KROK A: Jeśli użytkownik podał od razu tekst типа "Wola Dalsza 150/1",
+        # rozbijamy go na nazwę obrębu ("Wola Dalsza") oraz numer działki ("150/1")
+        match = re.match(r"^(.+?)\s+([0-9]+[0-9a-zA-Z/\.-]*)$", q_clean)
+        if match and not re.match(r"^\d{6}_", q_clean):
+            region_name = match.group(1).strip()
+            parcel_nr = match.group(2).strip()
+
+            # 1. Pobieramy dokładny kod TERYT obrębu z usługi GetRegionByIdOrNr
+            reg_params = {
+                "request": "GetRegionByIdOrNr",
+                "id": region_name,
+                "result": "teryt,region,commune,county",
+            }
+            reg_resp = requests.get(base_url, params=reg_params, timeout=10)
+            reg_lines = [l.strip() for l in reg_resp.text.splitlines() if "|" in l]
+
+            found_parcels = []
+            for r_line in reg_lines[:6]:
+                reg_teryt = r_line.split("|")[0].strip()
+                # Sprawdzamy zarówno bezpośredni kod TERYT.NR (np. 181002_2.0007.150/1),
+                # jak i warianty z arkuszem ewidencyjnym AR_1, AR_2
+                candidate_ids = [
+                    f"{reg_teryt}.{parcel_nr}",
+                    f"{reg_teryt}.AR_1.{parcel_nr}",
+                    f"{reg_teryt}.AR_2.{parcel_nr}",
+                ]
+                for cid in candidate_ids:
+                    # Budujemy URL z niezakodowanym znakiem '/', czego wymagają niektóre serwery GUGiK
+                    direct_url = (
+                        f"{base_url}?request=GetParcelByIdOrNr&id={cid}"
+                        f"&result=teryt,voivodeship,county,commune,region,parcel,geom_wkt&srid=2180"
+                    )
+                    p_resp = requests.get(direct_url, timeout=8)
+                    parsed = parse_uldk_parcel_lines(p_resp.text)
+                    if parsed:
+                        found_parcels.extend(parsed)
+                        break
+
+            if found_parcels:
+                return found_parcels, None
+
+        # KROK B: Standardowe zapytanie bezpośrednie (gdy wpisano pełny TERYT lub prostą nazwę)
+        params = {
+            "request": "GetParcelByIdOrNr",
+            "id": q_clean,
+            "result": "teryt,voivodeship,county,commune,region,parcel,geom_wkt",
+            "srid": "2180",
+        }
         resp = requests.get(base_url, params=params, timeout=12)
-        resp.raise_for_status()
-        lines = [line.strip() for line in resp.text.splitlines() if line.strip()]
-        if not lines:
-            return [], "Pusta odpowiedź z serwera GUGiK ULDK."
+        results = parse_uldk_parcel_lines(resp.text)
+        if results:
+            return results, None
 
-        # Wybieramy wszystkie wiersze zawierające dane rozdzielone znakiem '|'
-        data_lines = [l for l in lines if "|" in l]
-        if not data_lines:
-            return [], f"Nie znaleziono działki dla zapytania: '{query_val}' (Kod odpowiedzi: {lines[0]})"
-
-        results = []
-        for row in data_lines:
-            parts = row.split("|")
-            if len(parts) >= 7:
-                teryt, voiv, county, commune, region, parcel_nr, geom_wkt = parts[:7]
-                area_ha = calculate_wkt_area_ha(geom_wkt)
-                results.append(
-                    {
-                        "teryt": teryt,
-                        "wojewodztwo": voiv,
-                        "powiat": county,
-                        "gmina": commune,
-                        "obreb": region,
-                        "nr_dzialki": parcel_nr,
-                        "area_ha": area_ha,
-                        "label": f"{region} - dz. nr {parcel_nr} ({area_ha} ha) | TERYT: {teryt} [gm. {commune}, pow. {county}]",
-                    }
+        # KROK C: Jeśli działka z ukośnikiem (np. 150/1) nadal nie istnieje w GUGiK (np. świeży podział niezsynchronizowany
+        # przez starostwo lub inny numer podziałowy), sprawdzamy działkę macierzystą przed ukośnikiem (np. 150)
+        if "/" in q_clean:
+            base_query = q_clean.split("/")[0].strip()
+            base_results, _ = query_gugik_uldk("name", base_query)
+            if base_results:
+                return (
+                    base_results,
+                    f"Uwaga: W bazie GUGiK nie figuruje jeszcze podział `{q_clean}` (lub ma inny numer arkusza). "
+                    f"Załadowano działkę sąsiednią/macierzystą `{base_query}` – możesz ręcznie skorygować jej numer i ha poniżej.",
                 )
-        return results, None
+
+        return [], f"Nie znaleziono działki `{q_clean}` w bazie GUGiK ULDK."
     except Exception as e:
         return [], f"Błąd połączenia z serwerem GUGiK ULDK: {e}"
 
 
 # ==========================================
-# 4. INICJALIZACJA PAMIĘCI SESJI (SESSION STATE)
+# 5. INICJALIZACJA PAMIĘCI SESJI (SESSION STATE)
 # ==========================================
+local_sor_list, local_sor_msg = load_local_mrirw_registry()
+
 if "sor_db" not in st.session_state:
-    st.session_state.sor_db = DEFAULT_SOR_DB.copy()
+    if local_sor_list:
+        st.session_state.sor_db = local_sor_list
+        st.session_state.sor_source_info = local_sor_msg
+    else:
+        st.session_state.sor_db = DEFAULT_SOR_DB.copy()
+        st.session_state.sor_source_info = f"Wbudowana baza startowa ({len(DEFAULT_SOR_DB)} najpopularniejszych ŚOR). Wgraj plik `rejestr_sor.xlsx` na GitHuba, aby mieć ~2800 środków."
 
 if "parcel_id_input" not in st.session_state:
-    st.session_state.parcel_id_input = "181002_2.0007.214 (Wola Dalsza - dz. 214)"
+    st.session_state.parcel_id_input = "181002_2.0007.150/1 (Wola Dalsza - dz. 150/1)"
 
 if "area_ha_input" not in st.session_state:
-    st.session_state.area_ha_input = 12.50
+    st.session_state.area_ha_input = 1.50
 
 if "uldk_results" not in st.session_state:
     st.session_state.uldk_results = []
@@ -381,18 +514,18 @@ if "eu_log_history" not in st.session_state:
 
 
 # ==========================================
-# 5. NAGŁÓWEK APLIKACJI
+# 6. NAGŁÓWEK APLIKACJI
 # ==========================================
 st.title("🚜 AgroCompliance 2027: Asystent Oprysków i Ewidencji ŚOR")
 st.markdown(
-    "**Wersja rozwojowa v0.4** | Moduł 1: Radar IMGW & Delta-T | "
-    "Moduł 2: Geolokalizacja GUGiK ULDK + Słownik EPPO + Tank-Mix | "
+    "**Wersja rozwojowa v0.4.5** | Moduł 1: Radar IMGW & Delta-T | "
+    "Moduł 2: Smart-ULDK (obsługa podziałów `/`) + Pełny Rejestr MRiRW + Tank-Mix | "
     "Moduł 3: Wielopolowy Dziennik Ewidencji UE 2023/564"
 )
 st.divider()
 
 # ==========================================
-# 6. MODUŁ 1: RADAR OKNA OPRYSKOWEGO (IMGW + DELTA-T)
+# 7. MODUŁ 1: RADAR OKNA OPRYSKOWEGO (IMGW + DELTA-T)
 # ==========================================
 st.header("📡 Moduł 1: Warunki Pogodowe i Fizykochemia Kropli (Delta-T)")
 
@@ -480,20 +613,19 @@ else:
 st.divider()
 
 # ==========================================
-# 7. MODUŁ 2: GEOLOKALIZACJA GUGiK ULDK, EPPO I KALKULATOR ZBIORNIKA
+# 8. MODUŁ 2: SMART-ULDK, PEŁNA BAZA ŚOR I KALKULATOR ZBIORNIKA
 # ==========================================
-st.header("🗺️ Moduł 2: Geolokalizacja Działki (GUGiK ULDK), Słownik EPPO i Tank-Mix")
+st.header("🗺️ Moduł 2: Geolokalizacja Działki (Smart-ULDK), Słownik EPPO i Tank-Mix")
 
-# Podmoduł wyszukiwarki działek katastralnych GUGiK ULDK
 with st.container(border=True):
     st.subheader("🛰️ A. Automatyczne pobieranie działki i powierzchni z serwera GUGiK ULDK")
     st.caption(
-        "Wpisz nazwę obrębu (miejscowości) i numer działki (np. `Wola Dalsza 214` lub `Kaczynos 15`) albo pełny kod TERYT. "
-        "System pobierze z GUGiK granice działki w układzie EPSG:2180 i wyliczy jej dokładną powierzchnię ze wzoru Gaussa."
+        "Dwuetapowy silnik Smart-ULDK: wpisz nazwę miejscowości i numer działki (także z ukośnikiem po podziale, np. `Wola Dalsza 150/1`). "
+        "System najpierw pobierze kod TERYT obrębu, a następnie odpyta tabelę katastralną o dokładną geometrię działki."
     )
 
     uldk_tab1, uldk_tab2 = st.tabs(
-        ["🔍 Szukaj po nazwie obrębu i nr działki / TERYT", "📍 Szukaj po współrzędnych GPS (WGS84)"]
+        ["🔍 Szukaj po nazwie obrębu i nr działki (np. Wola Dalsza 150/1)", "📍 Szukaj po współrzędnych GPS (WGS84)"]
     )
 
     with uldk_tab1:
@@ -501,19 +633,20 @@ with st.container(border=True):
         with u_col1:
             uldk_query_text = st.text_input(
                 "Obręb i numer działki (lub kod TERYT):",
-                value="Wola Dalsza 214",
-                placeholder="np. Wola Dalsza 214 lub 181002_2.0007.214",
+                value="Wola Dalsza 150/1",
+                placeholder="np. Wola Dalsza 150/1 lub 181002_2.0007.150/1",
             )
         with u_col2:
             st.write("")
             if st.button("🔎 Wyszukaj w GUGiK", use_container_width=True):
-                results, err = query_gugik_uldk("name", uldk_query_text)
-                if err:
-                    st.error(err)
+                results, warn_or_err = query_gugik_uldk("name", uldk_query_text)
+                if warn_or_err and not results:
+                    st.error(warn_or_err)
                     st.session_state.uldk_results = []
                 else:
+                    if warn_or_err:
+                        st.warning(warn_or_err)
                     st.session_state.uldk_results = results
-                    # Jeśli znaleziono dokładnie 1 działkę, od razu ładujemy ją do formularza
                     if len(results) == 1:
                         r = results[0]
                         st.session_state.parcel_id_input = f"{r['teryt']} ({r['obreb']} - dz. {r['nr_dzialki']})"
@@ -540,7 +673,6 @@ with st.container(border=True):
                     st.session_state.area_ha_input = r["area_ha"]
                     st.success(f"Namierzono działkę z GPS: **{r['label']}**")
 
-    # Jeśli GUGiK zwrócił więcej niż 1 pasującą działkę (np. kilka miejscowości o tej samej nazwie w Polsce)
     if len(st.session_state.uldk_results) > 1:
         st.info(f"Znaleziono {len(st.session_state.uldk_results)} pasujących działek w bazie GUGiK. Wybierz właściwą:")
         sel_col1, sel_col2 = st.columns([3, 1])
@@ -558,11 +690,35 @@ with st.container(border=True):
                 st.session_state.area_ha_input = r["area_ha"]
                 st.rerun()
 
-# Sekcja opcjonalnego dodania własnego ŚOR lub wgrania pliku z dane.gov.pl
-with st.expander(f"➕ Baza ŚOR (Obecnie wczytano: {len(st.session_state.sor_db)} preparatów) – Dopisz własny lub wgraj plik z MRiRW"):
-    tab_manual_sor, tab_excel_sor = st.tabs(
-        ["Dopisz pojedynczy środek", "Wgraj oficjalny plik .xlsx z dane.gov.pl"]
+# Zarządzanie bazą ŚOR (Etap 3.5)
+with st.expander(f"📦 Baza ŚOR MRiRW (Aktywnych środków: {len(st.session_state.sor_db)}) – Zarządzaj lub wgraj pełny rejestr"):
+    st.info(st.session_state.sor_source_info)
+    tab_excel_sor, tab_manual_sor = st.tabs(
+        ["📥 Wgraj pełny plik Excel (.xlsx) z dane.gov.pl", "➕ Dopisz pojedynczy środek ręcznie"]
     )
+
+    with tab_excel_sor:
+        st.caption(
+            "Jeśli wrzucisz plik `rejestr_sor.xlsx` bezpośrednio do swojego repozytorium na GitHubie, załaduje się on automatycznie przy każdym starcie. "
+            "Możesz też przeciągnąć go tutaj ręcznie na czas bieżącej sesji:"
+        )
+        uploaded_file = st.file_uploader(
+            "Wybierz oficjalny plik .xlsx lub .csv pobrany z dane.gov.pl", type=["xlsx", "csv"]
+        )
+        if uploaded_file is not None:
+            try:
+                df_mrirw = pd.read_csv(uploaded_file) if uploaded_file.name.endswith(".csv") else pd.read_excel(uploaded_file)
+                parsed_sor = parse_mrirw_dataframe(df_mrirw)
+                if parsed_sor:
+                    st.session_state.sor_db = parsed_sor
+                    st.session_state.sor_source_info = f"Wczytano z pliku użytkownika `{uploaded_file.name}` ({len(parsed_sor)} unikalnych ŚOR)"
+                    st.success(
+                        f"Przetworzono {len(df_mrirw)} wierszy z rejestru MRiRW i wyodrębniono **{len(parsed_sor)} unikalnych środków ochrony roślin**!"
+                    )
+                else:
+                    st.warning("Nie rozpoznano kolumn z nazwą i numerem zezwolenia w tym pliku.")
+            except Exception as e:
+                st.error(f"Błąd podczas czytania pliku: {e}")
 
     with tab_manual_sor:
         mc1, mc2, mc3, mc4, mc5 = st.columns([2, 1.5, 1, 1, 1])
@@ -593,18 +749,6 @@ with st.expander(f"➕ Baza ŚOR (Obecnie wczytano: {len(st.session_state.sor_db
                 st.success(f"Dodano **{new_name}** ({new_perm}) do listy wyboru!")
             else:
                 st.warning("Podaj przynajmniej nazwę środka oraz numer zezwolenia.")
-
-    with tab_excel_sor:
-        uploaded_file = st.file_uploader(
-            "Wybierz plik Excel (.xlsx) lub CSV z rejestrem MRiRW", type=["xlsx", "csv"]
-        )
-        if uploaded_file is not None:
-            try:
-                df_mrirw = pd.read_csv(uploaded_file) if uploaded_file.name.endswith(".csv") else pd.read_excel(uploaded_file)
-                st.success(f"Wczytano plik rządowy! Liczba wierszy w rejestrze: {len(df_mrirw)}")
-                st.dataframe(df_mrirw.head(5), use_container_width=True)
-            except Exception as e:
-                st.error(f"Błąd podczas czytania pliku: {e}")
 
 # Główny formularz pola, uprawy (EPPO) i opryskiwacza
 col_field, col_sprayer = st.columns([1, 1])
@@ -666,10 +810,15 @@ with col_sprayer:
         )
 
     sor_names_map = {item["nazwa"]: item for item in st.session_state.sor_db}
+    all_sor_keys = list(sor_names_map.keys())
+    default_sor_selection = [k for k in ["Chwastox Trio 540 SL", "Mospilan 20 SP"] if k in sor_names_map]
+    if not default_sor_selection and all_sor_keys:
+        default_sor_selection = [all_sor_keys[0]]
+
     selected_sor_names = st.multiselect(
-        f"Wybierz Środki Ochrony Roślin (dostępnych: {len(sor_names_map)}):",
-        options=list(sor_names_map.keys()),
-        default=["Chwastox Trio 540 SL", "Mospilan 20 SP"],
+        f"Wyszukaj i wybierz Środki Ochrony Roślin (w bazie: {len(sor_names_map)} pozycji):",
+        options=all_sor_keys,
+        default=default_sor_selection,
     )
 
     selected_foliar_names = st.multiselect(
@@ -700,7 +849,7 @@ else:
                 step=0.05,
                 key=f"dose_sor_{sor_name}",
             )
-            st.caption(f"Zezw.: `{sor_item['nr_zezwolenia']}` | Form.: **{sor_item['formulacja']}** | {sor_item['kategoria']}")
+            st.caption(f"Zezw.: `{sor_item['nr_zezwolenia']}` | Form.: **{sor_item['formulacja']}**")
             chosen_products_configured.append(
                 {
                     "typ": "ŚOR (Ewidencjonowany)",
@@ -790,7 +939,7 @@ else:
 st.divider()
 
 # ==========================================
-# 8. MODUŁ 3: WIELOPOLOWY DZIENNIK EWIDENCJI UE 2023/564
+# 9. MODUŁ 3: WIELOPOLOWY DZIENNIK EWIDENCJI UE 2023/564
 # ==========================================
 st.header("📋 Moduł 3: Elektroniczny Dziennik Ewidencji Zabiegów (Standard UE 2023/564)")
 
@@ -832,7 +981,6 @@ else:
             st.session_state.eu_log_history = []
             st.rerun()
 
-# Wyświetlenie zbiorczego Dziennika z wielu pól i eksport
 st.subheader(f"📚 Zbiorczy Dziennik Ewidencji Gospodarstwa (Zapisanych pozycji: {len(st.session_state.eu_log_history)})")
 
 if st.session_state.eu_log_history:
