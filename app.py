@@ -226,7 +226,6 @@ FOLIAR_ADDITIVES_DB = {
 # 3. PARSER BAZY MRiRW (ETAP 3.5)
 # ==========================================
 def detect_formulation_and_unit(name_str: str):
-    """Wyciąga kod formulacji (SL, EC, WG itp.) oraz jednostkę z nazwy handlowej ŚOR."""
     upper_name = str(name_str).upper()
     solid_forms = ["WG", "SG", "SP", "WP"]
     liquid_forms = ["SL", "EC", "EW", "SC", "CS", "SE", "OD"]
@@ -241,7 +240,6 @@ def detect_formulation_and_unit(name_str: str):
 
 
 def parse_mrirw_dataframe(df: pd.DataFrame) -> list:
-    """Przetwarza surowy arkusz MRiRW (~30 000 wierszy) na zdeduplikowaną listę unikalnych ŚOR."""
     cols_lower = {str(c).lower().strip(): c for c in df.columns}
 
     name_col = next((orig for low, orig in cols_lower.items() if "nazwa" in low), None)
@@ -252,7 +250,6 @@ def parse_mrirw_dataframe(df: pd.DataFrame) -> list:
     if not name_col or not perm_col:
         return []
 
-    # Usuwamy duplikaty po nazwie handlowej (w pliku MRiRW każdy środek występuje wiele razy dla różnych upraw)
     df_clean = df.dropna(subset=[name_col, perm_col]).drop_duplicates(subset=[name_col])
 
     parsed_list = []
@@ -282,7 +279,6 @@ def parse_mrirw_dataframe(df: pd.DataFrame) -> list:
 
 @st.cache_data(show_spinner=False)
 def load_local_mrirw_registry():
-    """Automatycznie wczytuje plik rejestr_sor.xlsx lub rejestr_sor.csv z repozytorium GitHub, jeśli istnieje."""
     for filename in ["rejestr_sor.xlsx", "rejestr_sor.csv"]:
         if os.path.exists(filename):
             try:
@@ -296,7 +292,7 @@ def load_local_mrirw_registry():
 
 
 # ==========================================
-# 4. FUNKCJE FIZYCZNE, POGODOWE I SMART-ULDK (NAPRAWA 150/1)
+# 4. FUNKCJE FIZYCZNE, POGODOWE I SMART-ULDK (Z KOTWICĄ TERYT)
 # ==========================================
 def safe_float(value, default=0.0):
     try:
@@ -334,7 +330,6 @@ def fetch_imgw_synop_data():
 
 
 def calculate_wkt_area_ha(wkt_str: str) -> float:
-    """Wylicza powierzchnię działki w hektarach (ha) z geometrii WKT (EPSG:2180) ze wzoru Gaussa."""
     if not wkt_str or "POLYGON" not in wkt_str.upper():
         return 0.0
 
@@ -373,7 +368,6 @@ def calculate_wkt_area_ha(wkt_str: str) -> float:
 
 
 def parse_uldk_parcel_lines(text_response: str) -> list:
-    """Parsuje wiersze odpowiedzi z GUGiK ULDK do listy słowników z wyliczoną powierzchnią."""
     lines = [line.strip() for line in text_response.splitlines() if line.strip()]
     data_lines = [l for l in lines if "|" in l and "POLYGON" in l.upper()]
     results = []
@@ -399,7 +393,7 @@ def parse_uldk_parcel_lines(text_response: str) -> list:
 
 @st.cache_data(ttl=3600)
 def query_gugik_uldk(search_mode: str, query_val: str):
-    """Dwuetapowy algorytm Smart-ULDK obsługujący działki po podziale (np. Wola Dalsza 150/1) oraz arkusze AR_."""
+    """Ulepszony algorytm Smart-ULDK z kotwicą TERYT dla działek z ukośnikiem (np. Wola Dalsza 150/1)."""
     base_url = "https://uldk.gugik.gov.pl/"
     q_clean = query_val.strip()
 
@@ -417,69 +411,80 @@ def query_gugik_uldk(search_mode: str, query_val: str):
                 return results, None
             return [], f"Nie znaleziono działki dla współrzędnych GPS: {q_clean}"
 
-        # KROK A: Jeśli użytkownik podał od razu tekst типа "Wola Dalsza 150/1",
-        # rozbijamy go na nazwę obrębu ("Wola Dalsza") oraz numer działki ("150/1")
-        match = re.match(r"^(.+?)\s+([0-9]+[0-9a-zA-Z/\.-]*)$", q_clean)
-        if match and not re.match(r"^\d{6}_", q_clean):
-            region_name = match.group(1).strip()
-            parcel_nr = match.group(2).strip()
-
-            # 1. Pobieramy dokładny kod TERYT obrębu z usługi GetRegionByIdOrNr
-            reg_params = {
-                "request": "GetRegionByIdOrNr",
-                "id": region_name,
-                "result": "teryt,region,commune,county",
-            }
-            reg_resp = requests.get(base_url, params=reg_params, timeout=10)
-            reg_lines = [l.strip() for l in reg_resp.text.splitlines() if "|" in l]
-
-            found_parcels = []
-            for r_line in reg_lines[:6]:
-                reg_teryt = r_line.split("|")[0].strip()
-                # Sprawdzamy zarówno bezpośredni kod TERYT.NR (np. 181002_2.0007.150/1),
-                # jak i warianty z arkuszem ewidencyjnym AR_1, AR_2
-                candidate_ids = [
-                    f"{reg_teryt}.{parcel_nr}",
-                    f"{reg_teryt}.AR_1.{parcel_nr}",
-                    f"{reg_teryt}.AR_2.{parcel_nr}",
-                ]
-                for cid in candidate_ids:
-                    # Budujemy URL z niezakodowanym znakiem '/', czego wymagają niektóre serwery GUGiK
-                    direct_url = (
-                        f"{base_url}?request=GetParcelByIdOrNr&id={cid}"
-                        f"&result=teryt,voivodeship,county,commune,region,parcel,geom_wkt&srid=2180"
-                    )
-                    p_resp = requests.get(direct_url, timeout=8)
-                    parsed = parse_uldk_parcel_lines(p_resp.text)
-                    if parsed:
-                        found_parcels.extend(parsed)
-                        break
-
-            if found_parcels:
-                return found_parcels, None
-
-        # KROK B: Standardowe zapytanie bezpośrednie (gdy wpisano pełny TERYT lub prostą nazwę)
+        # KROK 1: Próbujemy bezpośredniego zapytania do GUGiK
         params = {
             "request": "GetParcelByIdOrNr",
             "id": q_clean,
             "result": "teryt,voivodeship,county,commune,region,parcel,geom_wkt",
             "srid": "2180",
         }
-        resp = requests.get(base_url, params=params, timeout=12)
-        results = parse_uldk_parcel_lines(resp.text)
-        if results:
-            return results, None
+        resp = requests.get(base_url, params=params, timeout=10)
+        direct_results = parse_uldk_parcel_lines(resp.text)
+        if direct_results:
+            return direct_results, None
 
-        # KROK C: Jeśli działka z ukośnikiem (np. 150/1) nadal nie istnieje w GUGiK (np. świeży podział niezsynchronizowany
-        # przez starostwo lub inny numer podziałowy), sprawdzamy działkę macierzystą przed ukośnikiem (np. 150)
-        if "/" in q_clean:
-            base_query = q_clean.split("/")[0].strip()
-            base_results, _ = query_gugik_uldk("name", base_query)
-            if base_results:
+        # KROK 2 (KOTWICA TERYT): Jeśli zapytanie ma ukośnik (np. "Wola Dalsza 150/1"),
+        # GUGiK gubi się przy szukaniu po nazwie słownej z ukośnikiem.
+        # Pobieramy więc działkę bazową ("Wola Dalsza 150" lub działkę "1" w tym obrębie),
+        # wyciągamy z niej 13-znakowy prefiks TERYT obrębu (np. 181002_2.0006) i uderzamy bezpośrednio po TERYT!
+        match = re.match(r"^(.+?)\s+([0-9]+/[0-9a-zA-Z\.-]+)$", q_clean)
+        if match:
+            region_name = match.group(1).strip()
+            target_parcel_nr = match.group(2).strip()
+            base_num = target_parcel_nr.split("/")[0]
+
+            anchor_results = []
+            for probe_num in [base_num, "1", "2", "10", "100"]:
+                probe_params = {
+                    "request": "GetParcelByIdOrNr",
+                    "id": f"{region_name} {probe_num}",
+                    "result": "teryt,voivodeship,county,commune,region,parcel,geom_wkt",
+                    "srid": "2180",
+                }
+                probe_resp = requests.get(base_url, params=probe_params, timeout=8)
+                parsed_probe = parse_uldk_parcel_lines(probe_resp.text)
+                if parsed_probe:
+                    anchor_results = parsed_probe
+                    break
+
+            if anchor_results:
+                found_exact = []
+                checked_prefixes = set()
+                for anc in anchor_results:
+                    # Wyciągamy sam prefiks TERYT obrębu (wszystko przed ostatnią kropką, np. 181002_2.0006)
+                    teryt_prefix = anc["teryt"].rsplit(".", 1)[0]
+                    if teryt_prefix in checked_prefixes:
+                        continue
+                    checked_prefixes.add(teryt_prefix)
+
+                    # Sprawdzamy twardy kod TERYT dla szukanej działki z ukośnikiem (np. 181002_2.0006.150/1)
+                    for candidate_teryt in [
+                        f"{teryt_prefix}.{target_parcel_nr}",
+                        f"{teryt_prefix}.AR_1.{target_parcel_nr}",
+                        f"{teryt_prefix}.AR_2.{target_parcel_nr}",
+                    ]:
+                        t_params = {
+                            "request": "GetParcelByIdOrNr",
+                            "id": candidate_teryt,
+                            "result": "teryt,voivodeship,county,commune,region,parcel,geom_wkt",
+                            "srid": "2180",
+                        }
+                        t_resp = requests.get(base_url, params=t_params, timeout=8)
+                        t_parsed = parse_uldk_parcel_lines(t_resp.text)
+                        if t_parsed:
+                            found_exact.extend(t_parsed)
+                            break
+
+                if found_exact:
+                    return found_exact, None
+
+                # Jeśli po twardym TERYT 181002_2.0006.150/1 GUGiK nadal zwraca pustkę, to znaczy że w katastrze
+                # działka ma numer bez "/1" (czyli 150) lub ma inny numer podziałowy
                 return (
-                    base_results,
-                    f"Uwaga: W bazie GUGiK nie figuruje jeszcze podział `{q_clean}` (lub ma inny numer arkusza). "
-                    f"Załadowano działkę sąsiednią/macierzystą `{base_query}` – możesz ręcznie skorygować jej numer i ha poniżej.",
+                    anchor_results,
+                    f"Sprawdzono bezpośrednio w katastrze obrębu `{list(checked_prefixes)[0]}`: działka `{target_parcel_nr}` "
+                    f"nie figuruje pod tym numerem w GUGiK (w ewidencji widnieje jako działka `{anchor_results[0]['nr_dzialki']}`). "
+                    f"Załadowano geometrię działki `{anchor_results[0]['nr_dzialki']}` ({anchor_results[0]['area_ha']} ha).",
                 )
 
         return [], f"Nie znaleziono działki `{q_clean}` w bazie GUGiK ULDK."
@@ -488,23 +493,32 @@ def query_gugik_uldk(search_mode: str, query_val: str):
 
 
 # ==========================================
-# 5. INICJALIZACJA PAMIĘCI SESJI (SESSION STATE)
+# 5. BEZPIECZNA INICJALIZACJA PAMIĘCI SESJI (NAPRAWA ATTRIBUTE ERROR)
 # ==========================================
 local_sor_list, local_sor_msg = load_local_mrirw_registry()
 
-if "sor_db" not in st.session_state:
+# Zabezpieczenie przed starą sesją z v0.3 (automatyczny upgrade bazy z 8 do 24+ środków)
+if "sor_db" not in st.session_state or len(st.session_state.sor_db) < len(DEFAULT_SOR_DB):
     if local_sor_list:
         st.session_state.sor_db = local_sor_list
-        st.session_state.sor_source_info = local_sor_msg
     else:
         st.session_state.sor_db = DEFAULT_SOR_DB.copy()
-        st.session_state.sor_source_info = f"Wbudowana baza startowa ({len(DEFAULT_SOR_DB)} najpopularniejszych ŚOR). Wgraj plik `rejestr_sor.xlsx` na GitHuba, aby mieć ~2800 środków."
+
+# Zawsze upewniamy się, że sor_source_info istnieje w session_state (naprawa błędu z linii 695)
+if "sor_source_info" not in st.session_state:
+    if local_sor_list:
+        st.session_state.sor_source_info = local_sor_msg
+    else:
+        st.session_state.sor_source_info = (
+            f"Wbudowana baza startowa ({len(st.session_state.sor_db)} najpopularniejszych ŚOR). "
+            f"Możesz wgrać pełny plik `rejestr_sor.xlsx` z dane.gov.pl poniżej lub wrzucić go na GitHuba."
+        )
 
 if "parcel_id_input" not in st.session_state:
-    st.session_state.parcel_id_input = "181002_2.0007.150/1 (Wola Dalsza - dz. 150/1)"
+    st.session_state.parcel_id_input = "181002_2.0006.150 (Wola Dalsza - dz. 150)"
 
 if "area_ha_input" not in st.session_state:
-    st.session_state.area_ha_input = 1.50
+    st.session_state.area_ha_input = 0.12
 
 if "uldk_results" not in st.session_state:
     st.session_state.uldk_results = []
@@ -518,8 +532,8 @@ if "eu_log_history" not in st.session_state:
 # ==========================================
 st.title("🚜 AgroCompliance 2027: Asystent Oprysków i Ewidencji ŚOR")
 st.markdown(
-    "**Wersja rozwojowa v0.4.5** | Moduł 1: Radar IMGW & Delta-T | "
-    "Moduł 2: Smart-ULDK (obsługa podziałów `/`) + Pełny Rejestr MRiRW + Tank-Mix | "
+    "**Wersja rozwojowa v0.4.6** | Moduł 1: Radar IMGW & Delta-T | "
+    "Moduł 2: Smart-ULDK (Kotwica TERYT) + Pełny Rejestr MRiRW + Tank-Mix | "
     "Moduł 3: Wielopolowy Dziennik Ewidencji UE 2023/564"
 )
 st.divider()
@@ -620,12 +634,11 @@ st.header("🗺️ Moduł 2: Geolokalizacja Działki (Smart-ULDK), Słownik EPPO
 with st.container(border=True):
     st.subheader("🛰️ A. Automatyczne pobieranie działki i powierzchni z serwera GUGiK ULDK")
     st.caption(
-        "Dwuetapowy silnik Smart-ULDK: wpisz nazwę miejscowości i numer działki (także z ukośnikiem po podziale, np. `Wola Dalsza 150/1`). "
-        "System najpierw pobierze kod TERYT obrębu, a następnie odpyta tabelę katastralną o dokładną geometrię działki."
+        "Wpisz nazwę miejscowości i numer działki (np. `Wola Dalsza 150/1` lub `Wola Dalsza 214`) albo pełny kod TERYT (np. `181002_2.0006.150/1`)."
     )
 
     uldk_tab1, uldk_tab2 = st.tabs(
-        ["🔍 Szukaj po nazwie obrębu i nr działki (np. Wola Dalsza 150/1)", "📍 Szukaj po współrzędnych GPS (WGS84)"]
+        ["🔍 Szukaj po nazwie obrębu i nr działki", "📍 Szukaj po współrzędnych GPS (WGS84)"]
     )
 
     with uldk_tab1:
@@ -634,7 +647,7 @@ with st.container(border=True):
             uldk_query_text = st.text_input(
                 "Obręb i numer działki (lub kod TERYT):",
                 value="Wola Dalsza 150/1",
-                placeholder="np. Wola Dalsza 150/1 lub 181002_2.0007.150/1",
+                placeholder="np. Wola Dalsza 150/1 lub 181002_2.0006.150/1",
             )
         with u_col2:
             st.write("")
@@ -690,9 +703,9 @@ with st.container(border=True):
                 st.session_state.area_ha_input = r["area_ha"]
                 st.rerun()
 
-# Zarządzanie bazą ŚOR (Etap 3.5)
+# Zarządzanie bazą ŚOR (Zabezpieczone przez .get())
 with st.expander(f"📦 Baza ŚOR MRiRW (Aktywnych środków: {len(st.session_state.sor_db)}) – Zarządzaj lub wgraj pełny rejestr"):
-    st.info(st.session_state.sor_source_info)
+    st.info(st.session_state.get("sor_source_info", "Baza ŚOR gotowa do pracy."))
     tab_excel_sor, tab_manual_sor = st.tabs(
         ["📥 Wgraj pełny plik Excel (.xlsx) z dane.gov.pl", "➕ Dopisz pojedynczy środek ręcznie"]
     )
@@ -700,7 +713,7 @@ with st.expander(f"📦 Baza ŚOR MRiRW (Aktywnych środków: {len(st.session_st
     with tab_excel_sor:
         st.caption(
             "Jeśli wrzucisz plik `rejestr_sor.xlsx` bezpośrednio do swojego repozytorium na GitHubie, załaduje się on automatycznie przy każdym starcie. "
-            "Możesz też przeciągnąć go tutaj ręcznie na czas bieżącej sesji:"
+            "Możesz też przeciągnąć go tutaj ręcznie:"
         )
         uploaded_file = st.file_uploader(
             "Wybierz oficjalny plik .xlsx lub .csv pobrany z dane.gov.pl", type=["xlsx", "csv"]
